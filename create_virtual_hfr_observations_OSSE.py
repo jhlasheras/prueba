@@ -1,0 +1,163 @@
+import xarray as xr
+import numpy as np
+import tools
+import matplotlib.pyplot as plt
+import pandas as pd
+from glob import glob
+import random
+
+import scipy.interpolate as interp
+from datetime import datetime 
+from datetime import timedelta
+import shapefile
+from shapely.geometry import Point
+from shapely.geometry import Polygon
+
+
+""" Create virtual HF radar Observations for OSSE from Ibiza, Formentera and two supossed future stations in Denia
+    WMOP Forecast is used as Nature Run
+    A Shapefile was created as possible coverage area of the hipothetic antennas. Velocity fields are masked and 
+    only observations within the coverage area are considered. 
+    A percentage of observations within the area are randomly retired as possible antenna gaps and saved for validation 
+    
+    Author: Jaime Hernandez Lasheras (jhernandez@socib.es)
+    Date of creation: 28-February-2019  
+    """
+coverage_name = 'actual'
+# Path  to Nature Run
+nr_path = '/home/modelling/data/WMOP/WMOP_FORECAST/Outputs/FORECAST_CMEMS_RESTARTS/forecast_scratch/'
+
+# Path to shapefile
+shape_path = '/home/jhernandez/Escritorio/hfr_coverage_geodata/'
+shape_file = glob(shape_path + '/*' + coverage_name + '*shp')
+# Load Shapefile
+shape = shapefile.Reader(shape_file[0])
+
+feature = shape.shapeRecords()[0]
+first = feature.shape.__geo_interface__ 
+coverage = Polygon(feature.shape.points)
+
+
+date = datetime(2014,9,20)
+date_end = datetime(2014,10,24)
+
+while date < date_end:
+
+    strdate = date.strftime('%Y%m%d')
+
+    # Load WMOP file to extract Longitude and Latitude from
+    file_wmop = '{0}/roms_WMOP_FORECAST_{1}_his.nc'.format(nr_path, strdate)
+    ds_wmop = xr.open_dataset(file_wmop)
+
+    # Get index of bounding box limits
+    id1 = np.abs(ds_wmop.lon_u[1,:].values-0).argmin()
+    id2 = np.abs(ds_wmop.lon_u[1,:].values-1.4).argmin()
+    id3 = np.abs(ds_wmop.lat_u[:,1].values-38.1).argmin()
+    id4 = np.abs(ds_wmop.lat_u[:,1].values-39.2).argmin()
+
+    # Extract longitude and latitude for U and V for the area
+    lonu = ds_wmop.lon_u[id3:id4,id1:id2].values.reshape(-1)
+    latu = ds_wmop.lat_u[id3:id4,id1:id2].values.reshape(-1)
+    lonv = ds_wmop.lon_v[id3:id4,id1:id2].values.reshape(-1)
+    latv = ds_wmop.lat_v[id3:id4,id1:id2].values.reshape(-1)
+
+    mask_u = np.zeros(ds_wmop.lon_u.values.shape)
+    mask_v = np.zeros(ds_wmop.lon_v.values.shape)
+
+    # See  if point are contained within the polygon defined
+    mask_u1 = [coverage.contains(Point(lonu[i], latu[i])) for i in range(len(lonu))]
+    mask_v1 = [coverage.contains(Point(lonv[i], latv[i])) for i in range(len(lonv))] 
+    # Reshape to 2D
+    mask_u1 = np.array(mask_u1).reshape(id4-id3, id2-id1)
+    mask_v1 = np.array(mask_v1).reshape(id4-id3, id2-id1)
+
+    # Mask the whole domain
+    mask_u[id3:id4,id1:id2] = mask_u1
+    mask_v[id3:id4,id1:id2] = mask_v1
+
+    # Mask with NaNs
+    mask_u[mask_u==0] = np.nan
+    mask_v[mask_v==0] = np.nan
+
+    # Get velocity fields
+    u = ds_wmop.u[:,-1,:,:].mean(axis=0).values
+    v = ds_wmop.v[:,-1,:,:].mean(axis=0).values
+    # Apply mask
+    u = u*mask_u
+    v = v*mask_v
+
+    # Reshape as array
+    u_1d = u[np.isnan(u)==0]
+    lon_u = ds_wmop.lon_u.values[np.isnan(u)==0]
+    lat_u = ds_wmop.lat_u.values[np.isnan(u)==0]
+
+    v_1d = v[np.isnan(v)==0]
+    lon_v = ds_wmop.lon_v.values[np.isnan(v)==0]
+    lat_v = ds_wmop.lat_v.values[np.isnan(v)==0]
+
+
+    # Extract randomly a certain number of elements
+    idu = list(range(np.min([len(u_1d), len(v_1d)])))
+    idv = list(range(len(v_1d)))
+    random.shuffle(idu)
+    random.shuffle(idv)
+    # number of elements to extract
+    nb = int(np.round(len(u_1d)*0.15))    # 15%
+
+    # Extract randomly values for validation
+    u1 = u_1d[idu[1:nb]]
+    v1 = v_1d[idu[1:nb]]
+    lonu = lon_u[idu[1:nb]]
+    lonv = lon_v[idu[1:nb]]
+    latu = lat_u[idu[1:nb]]
+    latv = lat_v[idu[1:nb]]
+
+    u_1d[idu[1:nb]] = np.nan
+    v_1d[idv[1:nb]] = np.nan
+
+    # Get only valid observations
+    lon_u = lon_u[np.isnan(u_1d)==0]
+    lon_v = lon_v[np.isnan(v_1d)==0]
+    lat_u = lat_u[np.isnan(u_1d)==0]
+    lat_v = lat_v[np.isnan(v_1d)==0]
+    v_1d = v_1d[np.isnan(v_1d)==0]
+    u_1d = u_1d[np.isnan(u_1d)==0]
+
+    # Create DataFrame of subset for Validation
+
+    du_val = {'var': 'u', 'source': 'HF_Radar', 'year': date.year, 'month': date.month, 'day': date.day,'hour': date.hour,
+            'minute': date.minute,'lon': lonu, 'lat':latu, 'depth': 0.0, 'val':u1, 'err': 0.01, 'rep': 1}
+    dv_val = {'var': 'v', 'source': 'HF_Radar', 'year': date.year, 'month': date.month, 'day': date.day,'hour': date.hour,
+            'minute': date.minute,'lon': lonv, 'lat':latv, 'depth': 0.0, 'val':v1, 'err': 0.01, 'rep': 1}
+
+    dfu_val = pd.DataFrame(data=du_val)    # create dataframe with u and v obs
+    dfv_val = pd.DataFrame(data=dv_val)    
+    df_val = pd.concat([dfu_val, dfv_val])   # Concatenate
+
+
+    # Create New DataFrame of Sinthetic Observations
+
+    du_new = {'var': 'u', 'source': 'HF_Radar', 'year': date.year, 'month': date.month, 'day': date.day,'hour': date.hour,
+            'minute': date.minute,'lon': lon_u, 'lat':lat_u, 'depth': 0.0, 'val':u_1d, 'err': 0.01, 'rep': 1}
+    dv_new = {'var': 'v', 'source': 'HF_Radar', 'year': date.year, 'month': date.month, 'day': date.day,'hour': date.hour,
+            'minute': date.minute,'lon': lon_v, 'lat':lat_v, 'depth': 0.0, 'val':v_1d, 'err': 0.01, 'rep': 1}
+
+    dfu_new = pd.DataFrame(data=du_new)        # create dataframe with u and v obs
+    dfv_new = pd.DataFrame(data=dv_new)
+    df_hfr_new = pd.concat([dfu_new, dfv_new])   # Concatenate
+
+
+    # Paths for saving files
+    save_path = '/DATA/jhernandez/WMOP_ASSIM/Observations/HFR_OSSE/hfr_validation_2/'
+    output_file = '{0}assim_obs_HFR_{1}_{2}.obs'.format(save_path, coverage_name, strdate)
+    output_file_val = '{0}assim_obs_HFR_{1}_validation_{2}.obs'.format(save_path, coverage_name, strdate)
+
+    # save DataFrames
+    df_val.to_csv(output_file_val, header=None, sep=' ', index=False,  float_format='%.6f')
+    #df_hfr_new.to_csv(output_file, header=None, sep=' ', index=False,  float_format='%.6f')
+
+    print('File of synthetic observations of HF Radar on the whole Ibiza Channel created for {0}'.format(date.strftime('%d-%m-%Y')))
+
+    date = date + timedelta(days=1)
+
+    
